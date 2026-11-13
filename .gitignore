@@ -1,0 +1,19 @@
+# ---- Python 打包产物 ----
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ---- Python 缓存 ----
+__pycache__/
+*.py[cod]
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+.DS_Store

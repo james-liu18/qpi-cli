@@ -1,0 +1,89 @@
+name: release
+
+# 打 tag (v0.2.0 / v1.0.0 ...) 自动构建并发布到 PyPI。
+# 发布走 PyPI Trusted Publishing (OIDC), 不需要在仓库里存 token。
+# 首次发布前需在 PyPI 配置 pending publisher, 见 README 第 10 节。
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {} # 手动触发: 只构建 + 自检, 不发布
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 校验 tag 与包内版本一致
+        run: |
+          set -euo pipefail
+          VER=$(grep -oP '(?<=^__version__ = ")[^"]+' src/qpi_cli/__init__.py)
+          echo "package version = $VER"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME#v}"
+            if [ "$TAG" != "$VER" ]; then
+              echo "::error::tag '$TAG' 与 __version__ '$VER' 不一致"
+              exit 1
+            fi
+          fi
+
+      - name: 构建 sdist + wheel
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade build twine
+          python -m build
+          twine check dist/*
+
+      - name: 安装产物自检
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/smoke
+          # 不装任何依赖, 验证 wheel 是纯标准库 + 入口点可用
+          /tmp/smoke/bin/pip install --no-deps dist/*.whl
+          /tmp/smoke/bin/qpi-cli --version
+          /tmp/smoke/bin/qpi-cli --help > /dev/null
+          /tmp/smoke/bin/python -m qpi_cli --help > /dev/null
+          echo "smoke test OK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  pypi:
+    name: publish to PyPI
+    needs: build
+    # 只在打 tag 时发布; 手动触发只跑 build job
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/qpi-cli/
+    permissions:
+      id-token: write # Trusted Publishing: 换取临时上传凭证
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: 发布到 PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # 若改用 API token 而不是 Trusted Publishing, 换成:
+        #   with:
+        #     password: ${{ secrets.PYPI_API_TOKEN }}
