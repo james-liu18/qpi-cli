@@ -14,6 +14,7 @@ from .core import (
     BUILD_DIR,
     BUILD_SH,
     FLASH_SH,
+    GEN_HEADER,
     INSTALL_ENV_SH,
     VERSION_TXT,
     banner,
@@ -23,6 +24,9 @@ from .core import (
     default_config,
     error,
     flash_entry_error,
+    fw_dir_name,
+    fw_dir_problem,
+    has_fw_fingerprint,
     info,
     resolve_flash_entry,
     run_sdk,
@@ -185,9 +189,7 @@ def _dir_size_mb(path):
 def cmd_ls_versions(args):
     ctx = args.ctx
     dirs = ctx.rev_dirs()
-    cur_rev = ctx.current_rev()
-    cur_custom = ctx.current_custom()
-    cur_dir = cur_rev + ("_DBG" if "DBG" in cur_custom.split("/") else "")
+    cur_dir = ctx.current_fw_name()
 
     rows = []
     for name, path, state in dirs:
@@ -522,14 +524,69 @@ def cmd_build(args):
 
 def cmd_package(args):
     ctx = args.ctx
-    info("打包固件 (a_key_generation + deb-publish)")
-    rc = run_sdk("buildpackage", ctx.root, verbose=args.verbose, dry_run=args.dry_run)
+    # buildpackage 依赖 QUECTEL_PROJECT_* 环境变量, 而 source build.sh 并不会设置
+    # 它们 (只有 buildconfig/buildenv 才会)。这里直接从 header 读出并显式导出,
+    # 避免版本号为空导致 a_key_generation 把产物落到 quectel_build/ 根目录。
+    hdr = ctx.current_header()
+    project = hdr.get("QUECTEL_PROJECT_NAME") or dget(
+        ctx.config, "build.project", "QSM565DWF"
+    )
+    rev = hdr.get("QUECTEL_PROJECT_REV", "")
+    custom = hdr.get("QUECTEL_CUSTOM_NAME") or dget(
+        ctx.config, "build.version", "STD"
+    )
+    if not rev:
+        error("无法从 %s 读取 QUECTEL_PROJECT_REV" % ctx.p(GEN_HEADER))
+        warn("请先执行 qpi-cli build, 或在 SDK 环境里执行 buildconfig")
+        return 1
+
+    body = "\n".join(
+        [
+            "export QUECTEL_PROJECT_NAME=%s" % shlex.quote(project),
+            "export QUECTEL_PROJECT_REV=%s" % shlex.quote(rev),
+            "export QUECTEL_CUSTOM_NAME=%s" % shlex.quote(custom),
+            "buildpackage",
+        ]
+    )
+
+    info("打包固件 (project=%s rev=%s custom=%s)" % (project, rev, custom))
+    rc = run_sdk(body, ctx.root, verbose=args.verbose, dry_run=args.dry_run)
     if rc == 0 and not args.dry_run:
-        rev = ctx.current_rev()
-        custom = ctx.current_custom()
-        out = rev + ("_DBG" if "DBG" in custom.split("/") else "")
-        info("固件输出目录: %s" % ctx.p("quectel_build", out))
+        name = fw_dir_name(rev, custom)
+        out = ctx.p("quectel_build", name)
+        if os.path.isdir(out) and has_fw_fingerprint(out):
+            info("固件输出目录: %s" % out)
+            info("烧录: qpi-cli flash ufs")
+        else:
+            warn("打包命令已返回, 但未检测到可烧录固件: %s" % out)
     return rc
+
+
+def _resolve_fw_dir(ctx, value):
+    """--fw-dir 支持绝对/相对路径, 也支持 quectel_build/ 下的目录名。"""
+    expanded = os.path.abspath(os.path.expanduser(value))
+    if os.path.isdir(expanded):
+        return expanded
+    cand = ctx.p("quectel_build", value)
+    if os.path.isdir(cand):
+        return cand
+    return expanded
+
+
+def _report_available_fw(ctx, storage):
+    """固件不可烧录时, 列出 quectel_build/ 下现成可烧录的包。"""
+    name, _path = ctx.current_fw_dir()
+    info("当前 buildconfig 对应目录: %s" % (name or "<header 不可解析>"))
+    dirs = ctx.packaged_fw_dirs()
+    if not dirs:
+        warn("quectel_build/ 下没有已打包的固件")
+        info("先打包: qpi-cli package")
+        return
+    info("已打包可烧录的固件:")
+    for n, _p in dirs:
+        print("    %s%s" % (n, "  (当前)" if n == name else ""))
+    print()
+    print("  烧录现成固件: qpi-cli flash %s --fw-dir %s" % (storage, dirs[0][0]))
 
 
 def cmd_flash(args):
@@ -547,11 +604,29 @@ def cmd_flash(args):
         warn("检查 tools/VERSION.txt 的 FLASH_ENTRY 或回落路径 %s" % FLASH_SH)
         return 1
 
+    # 固件目录预检: 提前给出可执行的建议, 而不是让 flash.sh 在末尾报难懂的错。
+    fw_name, fw_path = ctx.current_fw_dir()
+    if getattr(args, "fw_dir", None):
+        fw_path = _resolve_fw_dir(ctx, args.fw_dir)
+        fw_name = os.path.basename(fw_path.rstrip(os.sep))
+    problem = fw_dir_problem(fw_path)
+    if problem:
+        error("固件目录不可烧录: %s (%s)" % (fw_path or "<空>", problem))
+        _report_available_fw(ctx, storage)
+        if getattr(args, "fw_dir", None):
+            return 1
+        info("或先打包当前 buildconfig: qpi-cli package")
+        if not args.dry_run:
+            return 1
+        warn("dry-run: 继续打印烧录计划; 实际执行会在此退出")
+
     info("烧录固件 (storage=%s)" % storage)
-    print("  entry : %s" % entry_abs)
+    print("  entry   : %s" % entry_abs)
+    print("  firmware: %s (%s)" % (fw_path, fw_name))
     if args.dry_run:
         banner("dry-run: 将要执行的烧录命令")
         print("  cd %s" % shlex.quote(ctx.root))
+        print("  QPI_FW_DIR=%s" % shlex.quote(fw_path))
         print("  source %s" % shlex.quote(BUILD_SH))
         print("  flash %s" % shlex.quote(storage))
         print("  # FLASH_ENTRY 已解析为: %s" % entry_abs)
@@ -561,6 +636,7 @@ def cmd_flash(args):
         ctx.root,
         verbose=args.verbose,
         dry_run=False,
+        extra_env={"QPI_FW_DIR": fw_path},
     )
 
 

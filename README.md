@@ -98,7 +98,7 @@ qpi-cli flash ufs
 | `qpi-cli ls-versions` | 列出固件版本及状态（未构建 / 已构建未打包 / 已打包） |
 | `qpi-cli build` | `buildconfig` + `buildall`，完整构建 |
 | `qpi-cli package` | `a_key_generation`，生成可烧录固件包 |
-| `qpi-cli flash [ufs\|emmc]` | 烧录固件到开发板 |
+| `qpi-cli flash [ufs\|emmc] [--fw-dir DIR]` | 烧录固件到开发板（可指定固件目录） |
 | `qpi-cli kernel` | 内核相关操作（重编内核 / DTB / menuconfig） |
 | `qpi-cli clean` | 清理已打包固件或 bitbake 临时目录 |
 
@@ -120,6 +120,10 @@ qpi-cli flash ufs
 # 只想看看会执行什么，不真的动手
 qpi-cli build --os LINUX --ver STD --dry-run
 qpi-cli flash ufs --dry-run
+
+# 烧录现成的固件包（不改 buildconfig）
+qpi-cli ls-versions
+qpi-cli flash ufs --fw-dir SG565DWFPARL1A01_BL01BP01K0M01_QDP_LP6.6.0XX.01.00X_V0X
 
 # 调试版本（DBG）+ 安全启动
 qpi-cli build --os LINUX --ver DBG --sec
@@ -215,6 +219,10 @@ FLASH_ENTRY=scripts/flash.sh
 `qpi-cli flash` 最终仍然是通过 `source build.sh` 后调用 `flash <storage>` 完成，
 因此 SDK 里的烧录逻辑（自动识别 Linux/WSL 平台、选择 qdl 或 QFIL 等）完全保持不变。
 
+烧录前会先检查固件目录：当前 buildconfig 对应的版本未打包时直接给出提示，并列出
+`quectel_build/` 下现成可烧录的包。用 `--fw-dir` 可以跳过 buildconfig，直接烧某个
+已打包目录（目录名或路径均可），该值通过 `QPI_FW_DIR` 传给 `flash.sh`。
+
 ---
 
 ## 8. 环境变量
@@ -223,6 +231,7 @@ FLASH_ENTRY=scripts/flash.sh
 |------|------|
 | `QPI_SDK_ROOT` | 指定 SDK 根目录 |
 | `QPI_CONFIG` | 指定配置文件路径（覆盖用户级默认路径） |
+| `QPI_FW_DIR` | 指定烧录用的固件目录（`flash.sh` 直接读取，优先于 buildconfig） |
 | `NO_COLOR` | 设置后关闭彩色输出 |
 
 ---

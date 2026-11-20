@@ -131,6 +131,11 @@ def build_parser():
 
     p_flash = sub.add_parser("flash", parents=[common], help="烧录固件到开发板")
     p_flash.add_argument("storage", nargs="?", choices=["ufs", "emmc"], default="ufs")
+    p_flash.add_argument(
+        "--fw-dir",
+        metavar="DIR",
+        help="指定固件目录 (绝对/相对路径, 或 quectel_build/ 下的目录名)",
+    )
 
     p_kern = sub.add_parser("kernel", parents=[common], help="内核相关操作")
     p_kern.add_argument("--dtb", action="store_true", help="仅重编 DTB")

@@ -57,6 +57,32 @@ def has_fw_fingerprint(path):
     return False
 
 
+def fw_dir_name(rev, custom):
+    """按 buildpackage / flash.sh 的规则拼固件目录名 (DBG 版本带 _DBG 后缀)。"""
+    if not rev:
+        return ""
+    return rev + ("_DBG" if "DBG" in (custom or "").split("/") else "")
+
+
+def fw_dir_problem(path):
+    """检查固件目录是否具备烧录条件, 返回问题描述 (None 表示可烧录)。"""
+    if not os.path.isdir(path):
+        return "目录不存在"
+    try:
+        names = os.listdir(path)
+    except OSError as exc:
+        return "无法读取目录 (%s)" % exc
+    has_elf = any(fnmatch.fnmatch(n, "prog_firehose*.elf") for n in names)
+    has_xml = any(fnmatch.fnmatch(n, "rawprogram*.xml") for n in names)
+    if not has_elf and not has_xml:
+        return "目录内没有打包产物 (未执行 buildpackage)"
+    if not has_elf:
+        return "缺少 prog_firehose*.elf"
+    if not has_xml:
+        return "缺少 rawprogram*.xml"
+    return None
+
+
 # ---------------------------------------------------------------- 输出辅助 ---
 def _color(code, text):
     if sys.stdout.isatty() and os.environ.get("NO_COLOR") is None:
@@ -282,10 +308,27 @@ class Ctx:
         )
 
     # ---- 固件版本目录 (三态) ----
+    def current_fw_name(self):
+        """当前 buildconfig 对应的固件目录名 (含 DBG 后缀)。"""
+        return fw_dir_name(self.current_rev(), self.current_custom())
+
+    def current_fw_dir(self):
+        """返回 (目录名, 绝对路径); header 不可解析时名称为空。"""
+        name = self.current_fw_name()
+        return name, (self.p("quectel_build", name) if name else "")
+
     def rev_candidate_names(self):
         """当前 buildconfig 对应的候选版本目录名 (rev 与 rev_DBG)。"""
         rev = self.current_rev()
         return {rev, rev + "_DBG"}
+
+    def packaged_fw_dirs(self):
+        """已打包可烧录的固件目录 [(name, path)]。"""
+        return [
+            (name, path)
+            for name, path, state in self.rev_dirs()
+            if state == "已打包(可烧录)"
+        ]
 
     def rev_dirs(self):
         """枚举 quectel_build/ 下的固件版本目录及其状态。
@@ -338,22 +381,30 @@ class Ctx:
 
 
 # ------------------------------------------------------- SDK 环境内执行 -----
-def run_sdk(cmd_body, sdk_root, verbose=False, dry_run=False):
+def run_sdk(cmd_body, sdk_root, verbose=False, dry_run=False, extra_env=None):
     """在 source 过 build.sh 的 bash 环境里执行 cmd_body。
 
     build.sh 是 source 型脚本: 它会设置 TOPDIR/BUILDDIR 等变量、定义
     buildconfig/buildall/buildpackage/flash 等函数。所以这里生成一段临时
     bash, 先 source 再把调用体接在后面。
+
+    extra_env 会叠加到子进程环境 (例如 flash 的 QPI_FW_DIR)。
     """
+    env_prefix = ""
+    if extra_env:
+        env_prefix = "".join(
+            "export %s=%s\n" % (k, shlex.quote(str(v)))
+            for k, v in sorted(extra_env.items())
+        )
+
     lines = [
         "#!/bin/bash",
         "cd %s || exit 1" % shlex.quote(sdk_root),
         "source %s %s || { echo '[qpi-cli] ERROR: source build.sh failed' >&2; exit 1; }"
         % (shlex.quote(BUILD_SH), ">/dev/null" if not verbose else ""),
         "set -e",
-        cmd_body,
     ]
-    script = "\n".join(lines) + "\n"
+    script = "\n".join(lines) + "\n" + env_prefix + cmd_body + "\n"
 
     if dry_run:
         banner("dry-run: 将要执行的 SDK 环境脚本")
