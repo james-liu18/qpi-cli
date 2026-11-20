@@ -8,7 +8,7 @@
 只依赖 Python 3 标准库, 不引入任何第三方包。
 """
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 CLI_NAME = "qpi-cli"
 
 __all__ = ["__version__", "CLI_NAME", "main"]
