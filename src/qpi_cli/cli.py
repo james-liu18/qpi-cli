@@ -7,6 +7,7 @@ import sys
 from . import CLI_NAME, __version__
 from .commands import (
     cmd_build,
+    cmd_build_app,
     cmd_clean,
     cmd_config,
     cmd_doctor,
@@ -16,6 +17,7 @@ from .commands import (
     cmd_ls_versions,
     cmd_new,
     cmd_package,
+    cmd_sdk,
     cmd_setup,
     cmd_version,
 )
@@ -109,6 +111,12 @@ def build_parser():
     p_lsp = sub.add_parser("ls-projects", parents=[common], help="列出应用工程")
     p_lsp.add_argument("-j", "--json", action="store_true", help="JSON 输出")
 
+    p_bapp = sub.add_parser(
+        "build-app", parents=[common], help="交叉编译应用工程 (使用 SDK eSDK 工具链)"
+    )
+    p_bapp.add_argument("name", help="应用名")
+    p_bapp.add_argument("--clean", action="store_true", help="先执行 make clean")
+
     p_lsv = sub.add_parser(
         "ls-versions", parents=[common], help="列出固件版本及状态 (三态)"
     )
@@ -128,6 +136,11 @@ def build_parser():
     sub.add_parser(
         "package", parents=[common], help="a_key_generation: 生成可烧录固件包"
     )
+
+    p_sdk = sub.add_parser(
+        "sdk", parents=[common], help="导出交叉编译 SDK (buildsdk / buildesdk)"
+    )
+    p_sdk.add_argument("--ext", action="store_true", help="同时导出可扩展 SDK")
 
     p_flash = sub.add_parser("flash", parents=[common], help="烧录固件到开发板")
     p_flash.add_argument("storage", nargs="?", choices=["ufs", "emmc"], default="ufs")
@@ -175,9 +188,11 @@ def main(argv=None):
         "config": cmd_config,
         "new": cmd_new,
         "ls-projects": cmd_ls_projects,
+        "build-app": cmd_build_app,
         "ls-versions": cmd_ls_versions,
         "build": cmd_build,
         "package": cmd_package,
+        "sdk": cmd_sdk,
         "flash": cmd_flash,
         "kernel": cmd_kernel,
         "clean": cmd_clean,

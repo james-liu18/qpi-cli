@@ -33,7 +33,15 @@ from .core import (
     verdict,
     warn,
 )
-from .templates import CODE_WORKSPACE_TMPL, MAIN_C_TMPL, MAKEFILE_TMPL
+from .templates import (
+    BUILD_SH_TMPL,
+    CODE_WORKSPACE_TMPL,
+    ENV_SH_TMPL,
+    LAYER_CONF_TMPL,
+    MAIN_C_TMPL,
+    MAKEFILE_TMPL,
+    RECIPE_TMPL,
+)
 
 
 # ---------------------------------------------------------------- 子命令 ----
@@ -112,6 +120,95 @@ def cmd_config(args):
     return 0
 
 
+APP_LAYER_NAME = "meta-qpi-apps"
+# set_bb_env.sh 每次 source build.sh 都会拿这个模板重建 build-*/conf/bblayers.conf
+BBLAYERS_TMPL = "layers/meta-qcom-distro/conf/bblayers.conf"
+
+
+def _target_image(ctx):
+    """读取当前构建的镜像 recipe 名 (base-recipes), 缺省 quecpi-image。"""
+    try:
+        with open(ctx.p("quectel_build/config/base-recipes"), "r") as fh:
+            name = fh.read().strip()
+    except OSError:
+        name = ""
+    return name or dget(ctx.config, "build.image", "quecpi-image")
+
+
+def _add_layer_to_bblayers(path, layer_name):
+    """把 ${WORKSPACE}/layers/<name> 插到 EXTRALAYERS 块首行, 返回是否修改。"""
+    with open(path, "r") as fh:
+        lines = fh.read().splitlines()
+    entry = "${WORKSPACE}/layers/%s" % layer_name
+    if any(entry in line for line in lines):
+        return False
+    for idx, line in enumerate(lines):
+        if line.startswith("EXTRALAYERS ?="):
+            lines.insert(idx + 1, "  %s \\" % entry)
+            with open(path, "w") as fh:
+                fh.write("\n".join(lines) + "\n")
+            return True
+    return False
+
+
+def _ensure_app_layer(ctx):
+    """创建用户应用层并注册到 bblayers.conf, 返回层目录。"""
+    layer_dir = ctx.p("layers", APP_LAYER_NAME)
+    os.makedirs(os.path.join(layer_dir, "conf"), exist_ok=True)
+    layer_conf = os.path.join(layer_dir, "conf", "layer.conf")
+    if not os.path.isfile(layer_conf):
+        with open(layer_conf, "w") as fh:
+            fh.write(LAYER_CONF_TMPL)
+
+    # 模板是持久生效的, 构建目录里的那份只对当前会话生效 (下次 source 会被重建)
+    found = False
+    for rel in (BBLAYERS_TMPL, os.path.join(BUILD_DIR, "conf", "bblayers.conf")):
+        path = ctx.p(rel)
+        if not os.path.isfile(path):
+            continue
+        found = True
+        try:
+            if _add_layer_to_bblayers(path, APP_LAYER_NAME):
+                info("已把 %s 加入 %s 的 EXTRALAYERS" % (APP_LAYER_NAME, rel))
+        except OSError as exc:
+            warn("更新 %s 失败: %s" % (rel, exc))
+    if not found:
+        warn(
+            "未找到 bblayers.conf, 请手动把 ${WORKSPACE}/layers/%s 加入 EXTRALAYERS"
+            % APP_LAYER_NAME
+        )
+    return layer_dir
+
+
+def _write_app_recipe(layer_dir, app):
+    rec_dir = os.path.join(layer_dir, "recipes-apps", app)
+    os.makedirs(rec_dir, exist_ok=True)
+    path = os.path.join(rec_dir, "%s.bb" % app)
+    with open(path, "w") as fh:
+        fh.write(RECIPE_TMPL % {"app": app})
+    return path
+
+
+def _append_image_install(layer_dir, image, app):
+    """在镜像 bbappend 里追加 IMAGE_INSTALL, 保证应用进最终镜像。"""
+    img_dir = os.path.join(layer_dir, "recipes-images", "images")
+    os.makedirs(img_dir, exist_ok=True)
+    path = os.path.join(img_dir, "%s.bbappend" % image)
+    pkgs = []
+    if os.path.isfile(path):
+        with open(path, "r") as fh:
+            for line in fh:
+                m = re.match(r'^\s*IMAGE_INSTALL:append\s*=\s*"(.*)"\s*$', line)
+                if m:
+                    pkgs.extend(m.group(1).split())
+    if app not in pkgs:
+        pkgs.append(app)
+    with open(path, "w") as fh:
+        fh.write("# qpi-cli 生成: projects/ 下的应用装入镜像, 请勿手工编辑\n")
+        fh.write('IMAGE_INSTALL:append = " %s"\n' % " ".join(pkgs))
+    return path
+
+
 def cmd_new(args):
     ctx = args.ctx
     app = args.name
@@ -126,17 +223,25 @@ def cmd_new(args):
     if os.path.exists(app_dir) and not args.force:
         error("%s 已存在, 使用 --force 覆盖" % app_dir)
         return 1
-    os.makedirs(app_dir, exist_ok=True)
+    src_dir = os.path.join(app_dir, "src")
+    os.makedirs(src_dir, exist_ok=True)
 
-    with open(os.path.join(app_dir, "main.c"), "w") as fh:
+    with open(os.path.join(src_dir, "main.c"), "w") as fh:
         fh.write(MAIN_C_TMPL % app)
     with open(os.path.join(app_dir, "Makefile"), "w") as fh:
         fh.write(MAKEFILE_TMPL % {"app": app})
+    with open(os.path.join(app_dir, "env.sh"), "w") as fh:
+        fh.write(ENV_SH_TMPL)
+    with open(os.path.join(app_dir, "build.sh"), "w") as fh:
+        fh.write(BUILD_SH_TMPL)
+    os.chmod(os.path.join(app_dir, "env.sh"), 0o755)
+    os.chmod(os.path.join(app_dir, "build.sh"), 0o755)
     meta = {
         "name": app,
         "sdk": "yocto-h1",
         "board": "QCS6490",
         "target": "qcm6490-idp",
+        "toolchain": "eSDK (environment-setup-armv8-2a-qcom-linux)",
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     with open(os.path.join(app_dir, "qpi_app.json"), "w") as fh:
@@ -145,10 +250,47 @@ def cmd_new(args):
     with open(os.path.join(app_dir, "%s.code-workspace" % app), "w") as fh:
         fh.write(CODE_WORKSPACE_TMPL % {"app": app})
 
+    # 接入 Yocto: 用户 layer + recipe, 并追加到镜像 IMAGE_INSTALL
+    image = _target_image(ctx)
+    layer_dir = _ensure_app_layer(ctx)
+    recipe = _write_app_recipe(layer_dir, app)
+    bbappend = _append_image_install(layer_dir, image, app)
+
     info("已创建应用工程: %s" % app_dir)
-    print("  main.c / Makefile / qpi_app.json / %s.code-workspace" % app)
+    print("  src/main.c / Makefile / env.sh / build.sh / qpi_app.json")
+    print("  编译: qpi-cli build-app %s" % app)
+    print("  首次使用需先生成 eSDK (见 env.sh 内提示), 或设置 QPI_ESDK_ENV")
     print("  打开: code %s" % os.path.join(app_dir, "%s.code-workspace" % app))
+    info("已接入镜像 %s (bitbake 时自动交叉编译并打包)" % image)
+    print("  recipe : %s" % recipe)
+    print("  bbappend: %s" % bbappend)
+    print("  构建: qpi-cli build --os LINUX --ver STD")
     return 0
+
+
+def cmd_build_app(args):
+    ctx = args.ctx
+    app = args.name
+    projects_dir = ctx.p(dget(ctx.config, "projects_dir", "projects"))
+    app_dir = os.path.join(projects_dir, app)
+    if not os.path.isdir(app_dir):
+        error("应用工程不存在: %s (先执行 qpi-cli new %s)" % (app_dir, app))
+        return 1
+    script = os.path.join(app_dir, "build.sh")
+    if not os.path.isfile(script):
+        error("%s 缺少 build.sh, 不是 qpi-cli 创建的应用工程" % app_dir)
+        error("可重新生成: qpi-cli new %s --force" % app)
+        return 1
+
+    cmd = ["bash", script]
+    if args.clean:
+        cmd.append("clean")
+    banner("交叉编译应用工程: %s" % app)
+    print("  cwd : %s" % app_dir)
+    print("  cmd : %s" % " ".join(cmd))
+    if args.dry_run:
+        return 0
+    return subprocess.call(cmd, cwd=app_dir)
 
 
 def cmd_ls_projects(args):
@@ -520,6 +662,16 @@ def cmd_build(args):
         ctx.save_config()
         info("构建完成, 配置已回写: %s" % ctx.config_path)
     return rc
+
+
+def cmd_sdk(args):
+    ctx = args.ctx
+    func = "buildesdk" if args.ext else "buildsdk"
+    banner("导出交叉编译 SDK (%s)" % func)
+    info("运行: %s (bitbake populate_sdk, 耗时较长)" % func)
+    info("产物为 *_SDK.tar, 解压后执行其中 setup_sdk.sh 安装")
+    info("安装后可执行: qpi-cli build-app <app>")
+    return run_sdk(func, ctx.root, verbose=args.verbose, dry_run=args.dry_run)
 
 
 def cmd_package(args):

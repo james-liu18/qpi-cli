@@ -93,11 +93,13 @@ qpi-cli flash ufs
 | `qpi-cli doctor` | 只读预检宿主环境，逐项 PASS/WARN/FAIL |
 | `qpi-cli setup` | 安装宿主构建环境（执行 `install_build_env.sh`） |
 | `qpi-cli config` | 显示 / 初始化 / 读写配置 |
-| `qpi-cli new <app>` | 创建应用工程（含 `.code-workspace`） |
+| `qpi-cli new <app>` | 创建应用工程并接入镜像（源码框架 + recipe + `.code-workspace`） |
 | `qpi-cli ls-projects` | 列出应用工程 |
+| `qpi-cli build-app <app>` | 加载 eSDK 交叉工具链编译应用工程（`--clean` 先清理） |
 | `qpi-cli ls-versions` | 列出固件版本及状态（未构建 / 已构建未打包 / 已打包） |
 | `qpi-cli build` | `buildconfig` + `buildall`，完整构建 |
 | `qpi-cli package` | `a_key_generation`，生成可烧录固件包 |
+| `qpi-cli sdk [--ext]` | 导出交叉编译 SDK（`buildsdk` / `buildesdk`） |
 | `qpi-cli flash [ufs\|emmc] [--fw-dir DIR]` | 烧录固件到开发板（可指定固件目录） |
 | `qpi-cli kernel` | 内核相关操作（重编内核 / DTB / menuconfig） |
 | `qpi-cli clean` | 清理已打包固件或 bitbake 临时目录 |
@@ -141,6 +143,32 @@ qpi-cli clean --build --yes        # 删除 build-qcom-wayland/tmp-glibc
 qpi-cli ls-versions --json
 ```
 
+### 应用工程如何进镜像
+
+`qpi-cli new <app>` 除了在 `projects/<app>/` 下生成源码工程，还会创建一个用户
+bitbake 层 `layers/meta-qpi-apps/`：
+
+| 文件 | 作用 |
+|------|------|
+| `conf/layer.conf` | 层定义（`LAYERSERIES_COMPAT = "nanbield scarthgap"`） |
+| `recipes-apps/<app>/<app>.bb` | `inherit externalsrc`，源码指向 `projects/<app>` |
+| `recipes-images/images/<image>.bbappend` | `IMAGE_INSTALL:append = " <app>"`，装进最终镜像 |
+
+`<image>` 取自 `quectel_build/config/base-recipes`（默认 `quecpi-image`）。
+层的注册写入 `layers/meta-qcom-distro/conf/bblayers.conf` 的 `EXTRALAYERS` ——
+SDK 每次 source `build.sh` 都会用它重建 `build-*/conf/bblayers.conf`，所以必须改
+模板才能持久生效（同时也会更新当前构建目录里的那份）。
+
+因此应用有两条编译路径：
+
+```bash
+# 快速迭代：用 eSDK 工具链直接交叉编译，产物在 projects/<app>/<app>
+qpi-cli build-app <app>
+
+# 进镜像：bitbake 编译 recipe 并打包进 rootfs，之后 package + flash
+qpi-cli build --os LINUX --ver STD
+```
+
 ---
 
 ## 5. SDK 根目录的探测规则
@@ -175,7 +203,10 @@ qpi-cli doctor --sdk ~/Pi-H1-Linux-SDK
 2. SDK 根目录下的 `.qpi_config.json`（**只读覆盖**，方便团队统一约定）；
 3. 用户级默认路径 `~/.config/qpi-cli/config.json`（默认写到这里）。
 
-即：qpi-cli **不会**往你 clone 的 SDK 仓库里写文件，不会弄脏 git 工作区。
+即：配置文件本身**不会**写进你 clone 的 SDK 仓库。只有显式执行 `qpi-cli new`
+才会在 SDK 里生成 `projects/<app>/` 和 `layers/meta-qpi-apps/`（并修改
+`layers/meta-qcom-distro/conf/bblayers.conf`），这些属于应用工程产物，按需提交或
+加入 `.gitignore`。
 
 ```bash
 qpi-cli config                      # 查看当前配置与来源
