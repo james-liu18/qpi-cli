@@ -133,6 +133,8 @@ inherit externalsrc
 
 # 源码位于 SDK 的 projects 目录, bitbake 直接从该目录编译
 EXTERNALSRC = "${WORKSPACE}/projects/%(app)s"
+# 原地构建: 不设置时 externalsrc 会用 ${WORKDIR}/${BPN}-${PV} 当 B, 那里没有 Makefile
+EXTERNALSRC_BUILD = "${EXTERNALSRC}"
 
 do_compile() {
     oe_runmake
